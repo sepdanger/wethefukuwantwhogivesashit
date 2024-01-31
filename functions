@@ -1,0 +1,1414 @@
+<?php
+
+
+/**
+ * Filter stylesheet URI to contain versioning
+ */
+
+function wpdocs_custom_stylesheet_for_single_posts( $stylesheet, $stylesheet_dir ) {
+
+    $child_sheet = get_stylesheet_directory() . '/style.css';
+    $version = filemtime($child_sheet);
+    $stylesheet = $stylesheet . '?ver=' . $version;
+
+    return $stylesheet;
+}
+add_filter( 'stylesheet_uri', 'wpdocs_custom_stylesheet_for_single_posts', 10, 2 );
+
+
+/**
+ * Convert sqft to m2
+ */
+function rk_convert_sqft_to_m2($sqft) {
+    return round($sqft * 0.09290304);
+}
+
+function rk_ajax_search_autocomplete() {
+    
+    $search = $_POST['search'];
+
+    $args = array(
+        'posts_per_page' => -1,
+        'post_type'      => 'property',
+        's'              => $search,
+    );
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    $found_posts = $the_query->found_posts;
+
+    $html = '<ul class="rk-ajax-listings-wrapper">';
+
+    // The Loop
+    if ( $the_query->have_posts() ) {
+        while ( $the_query->have_posts() ) {
+            $the_query->the_post();
+            $post_id = get_the_ID();
+            $html .= '<li><a href="' . get_the_permalink() . '"><img src="' . get_the_post_thumbnail_url($post_id, 'thumbnail') . '" /><span>' . get_the_title() . '</span></a></li>';
+        }
+        
+    } else {
+        $html .= '<li class="autocomplete-no-listings-found">No Listings Found</li>';
+    }
+
+    if ( $found_posts == 1 ) {
+        $plural = '';
+    } else {
+        $plural = 's';
+    }
+
+    $html .= '</ul>';
+    $html .= '<div class="rk-ajax-listings-count">';
+        $html .= '<div class=""><i class="houzez-icon icon-pin mr-1"></i>' . $found_posts . ' Listing' . $plural . ' Found</div>';
+        $html .= '<div class=""><a href="/search-results/?keyword=' . $search .'">View All Results</a></div>';
+    $html .= '</div>';
+
+    /* Restore original Post Data */
+    wp_reset_postdata();
+
+    echo json_encode($html);
+
+    exit();
+}
+
+add_action("wp_ajax_rk_ajax_search_autocomplete", "rk_ajax_search_autocomplete");
+add_action("wp_ajax_nopriv_rk_ajax_search_autocomplete", "rk_ajax_search_autocomplete");
+/**
+ * Extends admin search to allow searching of MLS ID and Area
+ */
+function rk_extend_search( $query ) {
+
+    $post_type     = 'property';
+    $custom_fields = array('fave_mlsid', 'fave_community');
+
+    if ( $query->query['post_type'] != $post_type )
+        return;
+
+    $search_term = $query->query_vars['s'];
+
+    if ($search_term && $search_term != '') {
+        $meta_query = array( 'relation' => 'OR' );
+        foreach( $custom_fields as $custom_field ) {
+            array_push( $meta_query, array(
+                'key' => $custom_field,
+                'value' => $search_term,
+                'compare' => 'LIKE'
+            ));
+        }
+
+        $query->query_vars['s'] = '';
+        $query->set('_meta_or_title', $search_term);
+        $query->set( 'meta_query', $meta_query );
+        $query->set( 'tax_query', $tax_query );
+    }
+
+    return;
+    
+}
+add_action( 'pre_get_posts', 'rk_extend_search' );
+
+
+/**
+ * Modify the search query to work with meta felds
+ * @link https://wordpress.stackexchange.com/questions/78649/using-meta-query-meta-query-with-a-search-query-s
+ */
+add_action( 'pre_get_posts', function( $q )
+{
+    if( $title = $q->get( '_meta_or_title' ) )
+    {
+        add_filter( 'get_meta_sql', function( $sql ) use ( $title )
+        {
+            global $wpdb;
+
+            // Only run once:
+            static $nr = 0; 
+            if( 0 != $nr++ ) return $sql;
+
+            // Modified WHERE
+            $sql['where'] = sprintf(
+                " AND ( %s OR %s ) ",
+                $wpdb->prepare( "{$wpdb->posts}.post_title like '%%%s%%'", $title),
+                mb_substr( $sql['where'], 5, mb_strlen( $sql['where'] ) )
+            );
+
+            return $sql;
+        });
+    }
+});
+
+
+function rk_debug($data) {
+    echo "<pre>";
+    print_r($data);
+    echo "</pre>";
+}
+
+/**********************
+ * ADDS AN AREA FILTER
+ */
+
+add_action( 'restrict_manage_posts', 'wpse45436_admin_posts_filter_restrict_manage_posts' );
+/**
+ * First create the dropdown
+ * make sure to change POST_TYPE to the name of your custom post type
+ * 
+ * @author Ohad Raz
+ * 
+ * @return void
+ */
+function wpse45436_admin_posts_filter_restrict_manage_posts(){
+    $type = 'post';
+    if (isset($_GET['post_type'])) {
+        $type = $_GET['post_type'];
+    }
+
+
+
+    //only add filter to post type you want
+    if ('property' == $type){
+        //change this to the list of values you want to show
+        //in 'label' => 'value' format
+        
+        $terms = get_terms('property_area');
+        $values = array();
+
+        foreach ($terms as $term) {
+            $values[$term->name] = $term->slug; 
+        }
+        
+
+
+        ?>
+        <select name="areas_admin_filter">
+        <option value=""><?php _e('All Areas', 'wose45436'); ?></option>
+        <?php
+            $current_v = isset($_GET['areas_admin_filter'])? $_GET['areas_admin_filter']:'';
+            foreach ($values as $label => $value) {
+                printf
+                    (
+                        '<option value="%s"%s>%s</option>',
+                        $value,
+                        $value == $current_v? ' selected="selected"':'',
+                        $label
+                    );
+                }
+        ?>
+        </select>
+        <?php
+    }
+}
+
+
+add_filter( 'parse_query', 'wpse45436_posts_filter');
+/**
+ * if submitted filter by post meta
+ */
+function wpse45436_posts_filter( $query ){
+
+    global $pagenow;
+    $type = 'post';
+
+    $search_term = $_GET['areas_admin_filter'];
+    if (isset($_GET['post_type'])) {
+        $type = $_GET['post_type'];
+    }
+    if ( 'property' == $type && is_admin() && $pagenow=='edit.php' && isset($_GET['areas_admin_filter']) && $_GET['areas_admin_filter'] != '') {
+        $query->query_vars['tax_query']['relation'] = 'OR';
+        $query->query_vars['tax_query'][] = array(
+            'taxonomy' => 'property_area',
+            'field' => 'slug',
+            'terms' => array($search_term),
+        );
+    }
+}
+
+/**
+ * Fills out the MLS number with 4 digits prepended with an "M' if it doesn't exist
+ */
+function rk_update_manual_listing_mlsID() {
+
+    global $post; 
+
+    $counter_name = 'manual_listing_counter';
+    $counter = get_option($counter_name);
+
+    if (!$counter) {
+        add_option($counter_name, '1000', null, 'no');
+    } else {
+        $counter++;
+        update_option($counter_name, $counter, null, 'no');  
+
+        $mlsID = get_post_meta($post->ID, 'fave_mlsid', true);
+        if (!$mlsID) {
+            update_post_meta($post->ID, 'fave_mlsid', 'M' . $counter);
+        }
+    }
+
+}
+
+add_action('save_post','rk_update_manual_listing_mlsID');
+
+function rk_check_meta () {
+
+    if ( is_user_logged_in() && isset($_GET['check_post_meta']) ) {
+
+        global $post;
+        $post_id = $post->ID;
+
+        $data = get_post_meta($post_id);
+ 
+        echo '<pre>';
+        print_r($data);
+        echo '</pre>';
+        
+        wp_reset_postdata();
+
+        die();
+    }
+}
+//add_action('wp', 'rk_check_meta');
+
+function rk_update_post_w_data() {
+    
+    if (is_user_logged_in() && isset($_GET['run-update']) ) {
+
+        $args = array(
+            'posts_per_page' => 500,
+            'paged' => 3,
+            'post_type' => 'property',
+            'order' => 'DESC',
+            'orderby' => 'date',
+        );
+
+        // The Query
+        $the_query = new WP_Query( $args );
+
+        // The Loop
+        if ( $the_query->have_posts() ) {
+            
+            while ( $the_query->have_posts() ) {
+                $the_query->the_post();
+                
+               
+
+                // Update the post into the database
+                wp_update_post( $post_object );
+
+            }
+            
+        }
+        
+        wp_reset_postdata();
+
+        die('done4');
+    }
+}
+
+//add_action('wp', 'rk_update_post_w_data');
+
+function rk_filter_homepage_listings( $field ) {
+    
+    // reset choices
+    $field['choices'] = array(
+        '0' => 'No Longer Published or Featured',
+    );
+    
+    $args = array(
+        'posts_per_page' => -1,
+        'post_type' => 'property',
+        'post_status' => 'publish',
+        'meta_query' => array(
+            'relation' => 'AND',
+            array(
+                'key'     => 'fave_featured',
+                'value'   => 1,
+                'compare' => 'IN',
+            ),
+        ),
+    );
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    // The Loop
+    if ( $the_query->have_posts() ) {
+        
+        while ( $the_query->have_posts() ) {
+            $the_query->the_post();
+            $post_id = get_the_ID();
+            $title = get_the_title();
+            
+            $mlsID = get_post_meta($post_id, 'fave_mlsid')[0];
+            $field['choices'][ $post_id ] = $title . ' (#' . $mlsID . ')';
+
+        }
+        
+    }
+
+    /* Restore original Post Data */
+    wp_reset_postdata();
+
+    // return the field
+    return $field;
+    
+}
+
+add_filter('acf/load_field/key=field_63ff95924405e', 'rk_filter_homepage_listings');
+
+function rk_get_agent_data_from_post_type($post_id) {
+    $post_type  = get_post_type($post_id);
+    $title     = get_the_title($post_id);
+    $data      = [];
+
+    //houzez_agent
+    if ( $post_type == 'houzez_agent' ) {
+        $agent_email = get_post_meta($post_id, 'fave_agent_email')[0];
+        $data['email']   = $agent_email;
+        $data['message'] = 'Hi ' . $title . ', I saw your profile on ' . get_bloginfo('name') . ' and wanted to see if i can get some help.';
+    } else if ( $post_type == 'property' ) {
+        $agent_id = get_post_meta($post_id, 'fave_agents');
+        $agent    = get_post($agent_id[0]);
+        $agent_email = get_post_meta($agent->ID, 'fave_agent_email')[0];
+
+        $data['email']   = $agent_email;
+        $data['message'] = 'Hello, I am interested in [' . $title . ']';
+    }
+    
+    return $data;
+}
+
+function rk_populate_custom_gf_form_fields() {
+
+    $post_id    = get_the_ID();
+    $post_type  = get_post_type($post_id);
+    $agent_data = rk_get_agent_data_from_post_type($post_id, $post_type);
+    $post_types = ['houzez_agent','property'];
+
+    if (in_array( $post_type, $post_types )) {
+        ?>
+        <script type="text/javascript">
+
+            jQuery('.pacifico--contact-form_email input').val('<?php echo $agent_data['email'];?>');
+            jQuery('.pacifico--contact-form_message textarea').val('<?php echo $agent_data['message'];?>');
+
+        </script>
+        <?php
+    }
+}
+add_action('wp_footer', 'rk_populate_custom_gf_form_fields', 10, 2 );
+
+function rk_get_featured_listings($attr) {
+
+    $bedrooms_params = array(
+        'bedrooms-asc',
+        'bedrooms-desc'
+    );
+    $posts_per_page = 9;
+
+    $paged = get_query_var( 'paged' ) ? get_query_var( 'paged' ) : 1;
+    $args = array(
+        'paged' =>  $paged,
+        'post_type' => 'property',
+        'posts_per_page' => $posts_per_page,
+        'meta_query' => array(
+            'relation' => 'AND',
+            array(
+                'key'     => 'fave_featured',
+                'value'   => 1,
+                'compare' => 'IN',
+            ),
+        ),
+    );  
+
+    if ( isset($_GET['property_sort']) ) {
+        if ( in_array($_GET['property_sort'], $bedrooms_params) ) {
+
+           $args['meta_query'][] =  array(
+                'relation' => 'OR',
+                'bedrooms_exists' => array(
+                    'key' => 'fave_property_bedrooms',
+                    'compare' => 'EXISTS'
+                ),
+                // 'bedrooms_not_exists' => array(
+                //     'key' => 'fave_property_bedrooms',
+                //     'compare' => 'NOT EXISTS'
+                // )
+            );
+
+        }
+    }
+
+   if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ) {
+        $args['orderby'] = array(
+            'bedrooms_exists' => 'ASC',
+            //'bedrooms_not_exists' => 'ASC',
+        );
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ) {
+        $args['orderby'] = array(
+            'bedrooms_exists' => 'DESC',
+            //'bedrooms_not_exists' => 'DESC',
+        );
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ) {
+        $args['orderby'] = 'meta_value_num';
+        $args['meta_key'] = 'fave_property_price';
+        $args['order'] = 'ASC';
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ) {
+        $args['orderby'] = 'meta_value date';
+        $args['meta_key'] = 'fave_featured';
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ) {
+        $args['orderby'] = 'date';
+        $args['order'] = 'DESC'; 
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ) {
+        $args['orderby'] = 'date';
+        $args['order'] = 'ASC';  
+   } else {
+        $args['orderby'] = 'meta_value_num';
+        $args['meta_key'] = 'fave_property_price';
+        $args['order'] = 'DESC';
+   }
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    $count       = $the_query->found_posts;
+    $query_count = $the_query->post_count;
+    $query_ppp   = $posts_per_page;
+    $pageCount   = $the_query->post_count * $paged;
+
+    if ($query_count < $posts_per_page) {
+        $pageCount = $count;
+        $query_ppp = $query_count;
+    }
+
+    ob_start();
+    echo '<div id="community-listings">';
+        echo '<div class="post-by-comm--header">';
+            echo '<div class="post-by-comm--results">';
+                echo '<p>Showing ' . ($pageCount - $query_ppp + 1) . ' - ' . $pageCount . ' of ' . $count . ' Listings</p>';
+            echo '</div>';
+            echo '<div class="post-by-comm--sort">';
+                echo '<select class="post-by-comm--select">';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-desc' ? 'selected' : '') . ' value="price-desc">Price (most expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ? 'selected' : '') . ' value="price-asc">Price (least expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ? 'selected' : '') . ' value="date-desc">Date (Newest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ? 'selected' : '') . ' value="date-asc">Date (Oldest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ? 'selected' : '') . ' value="bedrooms-desc">Bedrooms (Most)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ? 'selected' : '') . ' value="bedrooms-asc">Bedrooms (Fewest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ? 'selected' : '') . ' value="featured-first">Featured First</option>';
+                echo '</select>';
+            echo '</div>';
+        echo '</div>';
+
+        // The Loop
+        if ( $the_query->have_posts() ) {
+            echo '<div id="properties_module_section" class="property-cards-module property-cards-module-v1 property-cards-module-3-cols">';
+                echo '<div id="module_properties" class="listing-view grid-view card-deck grid-view-3-cols">';
+                    while ( $the_query->have_posts() ) {
+
+                        $the_query->the_post();
+                            
+                        include get_template_directory() . '/template-parts/listing/item-v1.php';
+
+                    }
+                echo '</div>';
+            echo '</div>';
+        } else {
+            echo 'No properties available';
+        }
+
+        if ($the_query->max_num_pages > 1) {
+            echo '<div class="pagination">';
+                echo numericPagination($the_query);
+            echo '</div>';
+        }
+    echo '</div>';
+    
+    $html .= ob_get_contents();
+    ob_end_clean();
+
+    wp_reset_postdata();
+
+
+    return $html;
+}
+
+add_shortcode('featured_listings', 'rk_get_featured_listings');
+
+function rk_get_all_posts_by_ocean($attr) {
+
+    $bedrooms_params = array(
+        'bedrooms-asc',
+        'bedrooms-desc'
+    );
+    $posts_per_page = 9;
+    $paged = get_query_var( 'paged' ) ? get_query_var( 'paged' ) : 1;
+    $args = array(
+        'paged' =>  $paged,
+        'post_type' => 'property',
+        'posts_per_page' => $posts_per_page,
+        'meta_query' => array(
+            'relation' => 'OR',
+            array(
+                'key'     => 'fave_oceanfront',
+                'value'   => '(^|,)Oceanfront(,|$)',
+                'compare' => 'REGEXP',
+            ),
+            array(
+                'key'     => 'fave_oceanfront',
+                'value'   => '(^|,)Beachfront(,|$)',
+                'compare' => 'REGEXP',
+            ),
+        ),
+    );  
+
+    if ( isset($_GET['property_sort']) ) {
+        if ( in_array($_GET['property_sort'], $bedrooms_params) ) {
+
+           $args['meta_query'][] =  array(
+                'relation' => 'OR',
+                'bedrooms_exists' => array(
+                    'key' => 'fave_property_bedrooms',
+                    'compare' => 'EXISTS'
+                ),
+                // 'bedrooms_not_exists' => array(
+                //     'key' => 'fave_property_bedrooms',
+                //     'compare' => 'NOT EXISTS'
+                // )
+            );
+
+        }
+    }
+
+   if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ) {
+        $args['orderby'] = array(
+            'bedrooms_exists' => 'ASC',
+            //'bedrooms_not_exists' => 'ASC',
+        );
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ) {
+        $args['orderby'] = array(
+            'bedrooms_exists' => 'DESC',
+            //'bedrooms_not_exists' => 'DESC',
+        );
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ) {
+        $args['orderby'] = 'meta_value_num';
+        $args['meta_key'] = 'fave_property_price';
+        $args['order'] = 'ASC';
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ) {
+        $args['orderby'] = 'meta_value date';
+        $args['meta_key'] = 'fave_featured';
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ) {
+        $args['orderby'] = 'date';
+        $args['order'] = 'DESC'; 
+   } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ) {
+        $args['orderby'] = 'date';
+        $args['order'] = 'ASC';  
+   } else {
+        $args['orderby'] = 'meta_value_num';
+        $args['meta_key'] = 'fave_property_price';
+        $args['order'] = 'DESC';
+   }
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    $count       = $the_query->found_posts;
+    $query_count = $the_query->post_count;
+    $query_ppp   = $posts_per_page;
+    $pageCount   = $the_query->post_count * $paged;
+
+    if ($query_count < $posts_per_page) {
+        $pageCount = $count;
+        $query_ppp = $query_count;
+    }
+
+    ob_start();
+    echo '<div id="community-listings">';
+        echo '<div class="post-by-comm--header">';
+            echo '<div class="post-by-comm--results">';
+                echo '<p>Showing ' . ($pageCount - $query_ppp + 1) . ' - ' . $pageCount . ' of ' . $count . ' Listings</p>';
+            echo '</div>';
+            echo '<div class="post-by-comm--sort">';
+                echo '<select class="post-by-comm--select">';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-desc' ? 'selected' : '') . ' value="price-desc">Price (most expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ? 'selected' : '') . ' value="price-asc">Price (least expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ? 'selected' : '') . ' value="date-desc">Date (Newest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ? 'selected' : '') . ' value="date-asc">Date (Oldest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ? 'selected' : '') . ' value="bedrooms-desc">Bedrooms (Most)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ? 'selected' : '') . ' value="bedrooms-asc">Bedrooms (Fewest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ? 'selected' : '') . ' value="featured-first">Featured First</option>';
+                echo '</select>';
+            echo '</div>';
+        echo '</div>';
+
+        // The Loop
+        if ( $the_query->have_posts() ) {
+            echo '<div id="properties_module_section" class="property-cards-module property-cards-module-v1 property-cards-module-3-cols">';
+                echo '<div id="module_properties" class="listing-view grid-view card-deck grid-view-3-cols">';
+                    while ( $the_query->have_posts() ) {
+
+                        $the_query->the_post();
+                            
+                        include get_template_directory() . '/template-parts/listing/item-v1.php';
+
+                    }
+                echo '</div>';
+            echo '</div>';
+        } else {
+            echo 'No properties available';
+        }
+
+        if ($the_query->max_num_pages > 1) {
+            echo '<div class="pagination">';
+                echo numericPagination($the_query);
+            echo '</div>';
+        }
+    echo '</div>';
+    
+    $html .= ob_get_contents();
+    ob_end_clean();
+
+    wp_reset_postdata();
+
+
+    return $html;
+}
+
+add_shortcode('properties_by_ocean', 'rk_get_all_posts_by_ocean');
+
+function rk_get_all_posts_by_land($attr) { 
+
+    $posts_per_page  = 12;
+    $paged = get_query_var( 'paged' ) ? get_query_var( 'paged' ) : 1;
+    $args = array(
+        'paged' =>  $paged,
+        'post_type' => 'property',
+        'posts_per_page' => $posts_per_page,
+        'tax_query' => array( 
+            array( 'taxonomy' => 'property_type',
+                'field' => 'slug',
+                'relation' => 'AND',
+                'terms' => array('land')
+                )
+            ),
+        );
+
+
+       if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ) {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'ASC';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ) {
+            $args['orderby'] = 'meta_value date';
+            $args['meta_key'] = 'fave_featured';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'DESC'; 
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'ASC';  
+       } else {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'DESC';
+       }
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    $count       = $the_query->found_posts;
+    $query_count = $the_query->post_count;
+    $query_ppp   = $posts_per_page;
+    $pageCount   = $the_query->post_count * $paged;
+
+    if ($query_count < $posts_per_page) {
+        $pageCount = $count;
+        $query_ppp = $query_count;
+    }
+
+    ob_start();
+    echo '<div id="community-listings">';
+        echo '<div class="post-by-comm--header">';
+            echo '<div class="post-by-comm--results">';
+                echo '<p>Showing ' . ($pageCount - $query_ppp + 1) . ' - ' . $pageCount . ' of ' . $count . ' Listings</p>';
+            echo '</div>';
+            echo '<div class="post-by-comm--sort">';
+                echo '<select class="post-by-comm--select">';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-desc' ? 'selected' : '') . ' value="price-desc">Price (most expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ? 'selected' : '') . ' value="price-asc">Price (least expensive)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ? 'selected' : '') . ' value="date-desc">Date (Newest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ? 'selected' : '') . ' value="date-asc">Date (Oldest)</option>';
+                    echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ? 'selected' : '') . ' value="featured-first">Featured First</option>';
+                echo '</select>';
+            echo '</div>';
+        echo '</div>';
+
+        // The Loop
+        if ( $the_query->have_posts() ) {
+            echo '<div id="properties_module_section" class="property-cards-module property-cards-module-v1 property-cards-module-3-cols">';
+                echo '<div id="module_properties" class="listing-view grid-view card-deck grid-view-3-cols">';
+                    while ( $the_query->have_posts() ) {
+                        $the_query->the_post();
+                            
+                        include get_template_directory() . '/template-parts/listing/item-v1.php';
+
+                    }
+                echo '</div>';
+            echo '</div>';
+        } else {
+            echo 'No properties available';
+        }
+
+        if ($the_query->max_num_pages > 1) {
+            echo '<div class="pagination">';
+                echo numericPagination($the_query);
+            echo '</div>';
+        }
+    echo '</div>';
+    
+    $html .= ob_get_contents();
+    ob_end_clean();
+
+    wp_reset_postdata();
+
+
+    return $html;
+}
+
+add_shortcode('properties_by_land', 'rk_get_all_posts_by_land');
+
+/**
+ * A shortcode to display listings by the custom "community" Houzez field
+ */
+
+function rk_get_all_posts_by_community($attr) { 
+
+    $args = shortcode_atts( array(
+        'title' => '',
+        'community' => '',
+    ), $attr );
+
+    $community       = $args['community'];
+    $title           = $args['title'];
+    $posts_per_page  = 12;
+
+    $bedrooms_params = array(
+        'bedrooms-asc',
+        'bedrooms-desc'
+    );
+    
+
+        $community_list = str_replace(', ', ',', $community);
+        $community_list = explode(',', $community_list);
+        $paged = get_query_var( 'paged' ) ? get_query_var( 'paged' ) : 1;
+
+       $args = array(
+            'paged' =>  $paged,
+            'post_type' => 'property',
+            'posts_per_page' => $posts_per_page,
+            'post_status' => 'publish',
+        );
+
+       if ($community != '') {
+            $args['tax_query'] = array(
+                array(
+                    'taxonomy' => 'property_area',
+                    'field'    => 'name',
+                    'terms'    => $community_list,
+                    'operator' => 'IN',
+                ),
+            );
+       }
+
+
+        if ( isset($_GET['property_sort']) ) {
+            if ( in_array($_GET['property_sort'], $bedrooms_params) ) {
+
+               $args['meta_query'][] =  array(
+                    'relation' => 'OR',
+                    'bedrooms_exists' => array(
+                        'key' => 'fave_property_bedrooms',
+                        'compare' => 'EXISTS'
+                    ),
+                    // 'bedrooms_not_exists' => array(
+                    //     'key' => 'fave_property_bedrooms',
+                    //     'compare' => 'NOT EXISTS'
+                    // )
+                );
+
+            }
+        }
+
+       if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ) {
+            $args['orderby'] = array(
+                'bedrooms_exists' => 'ASC',
+                //'bedrooms_not_exists' => 'ASC',
+            );
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ) {
+            $args['orderby'] = array(
+                'bedrooms_exists' => 'DESC',
+                //'bedrooms_not_exists' => 'DESC',
+            );
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ) {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'ASC';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ) {
+            $args['orderby'] = 'meta_value date';
+            $args['meta_key'] = 'fave_featured';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'DESC'; 
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'ASC';  
+       } else {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'DESC';
+       }
+
+       // echo '<pre>';
+       // print_r($args);
+       // echo '</pre>';
+
+       
+
+        // The Query
+        $the_query = new WP_Query( $args );
+
+        $count       = $the_query->found_posts;
+        $query_count = $the_query->post_count;
+        $query_ppp   = $posts_per_page;
+        $pageCount   = $the_query->post_count * $paged;
+
+        if ($query_count < $posts_per_page) {
+            $pageCount = $count;
+            $query_ppp = $query_count;
+        }
+
+        ob_start();
+        
+        echo '<div id="community-listings">';
+            echo '<div class="post-by-comm--header">';
+                echo '<div class="post-by-comm--results">';
+                    echo '<p>Showing ' . ($pageCount - $query_ppp + 1) . ' - ' . $pageCount . ' of ' . $count . ' Listings</p>';
+                echo '</div>';
+                echo '<div class="post-by-comm--sort">';
+                    echo '<select class="post-by-comm--select">';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-desc' ? 'selected' : '') . ' value="price-desc">Price (most expensive)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ? 'selected' : '') . ' value="price-asc">Price (least expensive)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ? 'selected' : '') . ' value="date-desc">Date (Newest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ? 'selected' : '') . ' value="date-asc">Date (Oldest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ? 'selected' : '') . ' value="bedrooms-desc">Bedrooms (Most)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ? 'selected' : '') . ' value="bedrooms-asc">Bedrooms (Fewest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ? 'selected' : '') . ' value="featured-first">Featured First</option>';
+                    echo '</select>';
+                echo '</div>';
+            echo '</div>';
+
+            // The Loop
+            if ( $the_query->have_posts() ) {
+                echo '<div id="properties_module_section" class="property-cards-module property-cards-module-v1 property-cards-module-3-cols">';
+                    echo '<div id="module_properties" class="listing-view grid-view card-deck grid-view-3-cols">';
+                        while ( $the_query->have_posts() ) {
+                            $the_query->the_post();
+                                
+                            include get_template_directory() . '/template-parts/listing/item-v1.php';
+
+                        }
+                    echo '</div>';
+                echo '</div>';
+            } else {
+                echo 'No properties available';
+            }
+
+            if ($the_query->max_num_pages > 1) {
+                echo '<div class="pagination">';
+                    echo numericPagination($the_query);
+                echo '</div>';
+            }
+        echo '</div>';
+        
+        $html .= ob_get_contents();
+        ob_end_clean();
+
+        wp_reset_postdata();
+
+    
+
+    return $html;
+
+}
+// register shortcode
+add_shortcode('properties_by_community', 'rk_get_all_posts_by_community');
+
+/**
+ * A shortcode to display listings by the custom "city" Houzez field
+ */
+
+function rk_get_all_posts_by_city($attr) { 
+
+    $args = shortcode_atts( array(
+        'city' => '',
+    ), $attr );
+
+    $city = $args['city'];
+    $posts_per_page = 9;
+    $bedrooms_params = array(
+        'bedrooms-asc',
+        'bedrooms-desc'
+    );
+    
+
+        $city_list = str_replace(', ', ',', $city);
+        $city_list = explode(',', $city_list);
+        $paged = get_query_var( 'paged' ) ? get_query_var( 'paged' ) : 1;
+
+       $args = array(
+            'paged' =>  $paged,
+            'post_type' => 'property',
+            'posts_per_page' => $posts_per_page,
+            'post_status' => 'publish',
+        );
+
+       if ($city != '') {
+            $args['tax_query'] = array(
+                array(
+                    'taxonomy' => 'property_city',
+                    'field'    => 'name',
+                    'terms'    => $city_list,
+                ),
+            );
+       }
+
+
+
+        if ( isset($_GET['property_sort']) ) {
+            if ( in_array($_GET['property_sort'], $bedrooms_params) ) {
+
+               $args['meta_query'] =  array(
+                    'relation' => 'OR',
+                    'bedrooms_exists' => array(
+                        'key' => 'fave_property_bedrooms',
+                        'compare' => 'EXISTS'
+                    ),
+                    // 'bedrooms_not_exists' => array(
+                    //     'key' => 'fave_property_bedrooms',
+                    //     'compare' => 'NOT EXISTS'
+                    // )
+                );
+
+            }
+        }
+
+       if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ) {
+            $args['orderby'] = array(
+                'bedrooms_exists' => 'ASC',
+                //'bedrooms_not_exists' => 'ASC',
+            );
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ) {
+            $args['orderby'] = array(
+                'bedrooms_exists' => 'DESC',
+                //'bedrooms_not_exists' => 'DESC',
+            );
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ) {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'ASC';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ) {
+            $args['orderby'] = 'meta_value date';
+            $args['meta_key'] = 'fave_featured';
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'DESC'; 
+       } else if ( isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ) {
+            $args['orderby'] = 'date';
+            $args['order'] = 'ASC';  
+       } else {
+            $args['orderby'] = 'meta_value_num';
+            $args['meta_key'] = 'fave_property_price';
+            $args['order'] = 'DESC';
+       }
+
+       // echo '<pre>';
+       // print_r($args);
+       // echo '</pre>';
+
+       
+
+        // The Query
+        $the_query = new WP_Query( $args );
+
+        $count       = $the_query->found_posts;
+        $query_count = $the_query->post_count;
+        $query_ppp   = $posts_per_page;
+        $pageCount   = $the_query->post_count * $paged;
+
+        if ($query_count < $posts_per_page) {
+            $pageCount = $count;
+            $query_ppp = $query_count;
+        }
+
+        ob_start();
+        echo '<div id="city-listings">';
+            echo '<div class="post-by-comm--header">';
+                echo '<div class="post-by-comm--results">';
+                    echo '<p>Showing ' . ($pageCount - $query_ppp + 1) . ' - ' . $pageCount . ' of ' . $count . ' Listings</p>';
+                echo '</div>';
+                echo '<div class="post-by-comm--sort">';
+                    echo '<select class="post-by-comm--select">';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-desc' ? 'selected' : '') . ' value="price-desc">Price (most expensive)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'price-asc' ? 'selected' : '') . ' value="price-asc">Price (least expensive)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-desc' ? 'selected' : '') . ' value="date-desc">Date (Newest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'date-asc' ? 'selected' : '') . ' value="date-asc">Date (Oldest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-desc' ? 'selected' : '') . ' value="bedrooms-desc">Bedrooms (Most)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'bedrooms-asc' ? 'selected' : '') . ' value="bedrooms-asc">Bedrooms (Fewest)</option>';
+                        echo '<option ' . (isset($_GET['property_sort']) && $_GET['property_sort'] == 'featured-first' ? 'selected' : '') . ' value="featured-first">Featured First</option>';
+                    echo '</select>';
+                echo '</div>';
+            echo '</div>';
+
+            // The Loop
+            if ( $the_query->have_posts() ) {
+                echo '<div id="properties_module_section" class="property-cards-module property-cards-module-v1 property-cards-module-3-cols">';
+                    echo '<div id="module_properties" class="listing-view grid-view card-deck grid-view-3-cols">';
+                        while ( $the_query->have_posts() ) {
+                            $the_query->the_post();
+                                
+                            include get_template_directory() . '/template-parts/listing/item-v1.php';
+
+                        }
+                    echo '</div>';
+                echo '</div>';
+            } else {
+                echo 'No properties available';
+            }
+
+            if ($the_query->max_num_pages > 1) {
+                echo '<div class="pagination">';
+                    echo numericPagination($the_query);
+                echo '</div>';
+            }
+        echo '</div>';
+        
+        $html .= ob_get_contents();
+        ob_end_clean();
+
+        wp_reset_postdata();
+
+    
+
+    return $html;
+
+}
+// register shortcode
+add_shortcode('properties_by_city', 'rk_get_all_posts_by_city');
+
+/**
+ * Updates the custom Houzez "community" text field with the additional features "area" data.
+ */
+function rk_update_community_custom_field() {
+
+    global $post; 
+
+    // do nothing if it's not a property CPT
+    if ($post->post_type != 'property'){
+        return;
+    }
+
+    // get the post meta
+    $post_meta = get_post_meta($post->ID);
+    // unserialize
+    $additional_features = unserialize( $post_meta['additional_features'][0] );
+
+    // loop through all the additional features data and assign the "area" value to the Houzez custom field.
+    foreach ($additional_features as $feature) {
+        if ($feature['fave_additional_feature_title'] == 'Area' || $feature['fave_additional_feature_title'] == 'Community') {
+            $community_value = $feature['fave_additional_feature_value'];
+            update_post_meta($post->ID, 'fave_community', $community_value);
+            if( !term_exists($community_value) ){
+                wp_insert_term($community_value, 'property_area');
+                wp_set_object_terms($post->ID, $community_value, 'property_area', true);
+            }
+        }
+        if ($feature['fave_additional_feature_title'] == 'View') {
+            $view_value = $feature['fave_additional_feature_value'];
+            if( $view_value == 'Ocean'){
+                update_post_meta($post->ID, 'fave_oceanfront', 'true');
+            }
+        }
+    }
+
+}
+
+function rk_update_posts_ocean() {
+    
+    $args = array(
+        'post_type' => 'property',
+        'posts_per_page' => -1,
+        'post_status' => 'publish',
+    );
+
+    // The Query
+    $the_query = new WP_Query( $args );
+
+    // The Loop
+    if ( $the_query->have_posts() ) {
+        echo '<ul>';
+        while ( $the_query->have_posts() ) {
+            $the_query->the_post();
+
+            $post_id = get_the_ID();
+            $post_meta = get_post_meta($post_id);
+            // unserialize
+            $additional_features = unserialize( $post_meta['additional_features'][0] );
+
+            if ($additional_features) {
+                foreach ($additional_features as $feature) {
+                    if ($feature['fave_additional_feature_title'] == 'View') {
+                        $view_value = $feature['fave_additional_feature_value'];
+                        if ( $view_value == 'Ocean' || $view_value == 'Marina'){
+                            update_post_meta($post_id, 'fave_oceanfront', '');
+                        }
+                    }
+                }
+            }
+        }
+        echo '</ul>';
+    } else {
+        // no posts found
+    }
+
+    die();
+    /* Restore original Post Data */
+    wp_reset_postdata();
+}
+
+//add_action('wp','rk_update_posts_ocean');
+
+//add_action('save_post','rk_update_community_custom_field');
+
+/**
+ * Filters the gravity forms submit <input> in order to change it to a
+ * <button> element
+ */
+add_filter( 'gform_submit_button', 'form_submit_button', 10, 5 );
+
+function form_submit_button ( $button, $form ){
+    $button = str_replace( "input", "button title=\"{$form['button']['text']}\"", $button );
+    $button = str_replace( "/", "", $button );
+    $button = str_replace('gform_button button', 'btn primary', $button);
+    $button .= "<span>{$form['button']['text']}</span></button>";
+    return $button;
+}
+
+/**
+ * Disables gutenberg on certain page templates
+ * @param  var $is_enabled gutenberg enabled flag
+ * @param  var $post_type  current post_type
+ */
+    
+function disable_gutenberg_on_posts($is_enabled, $post_type) {
+    
+    /**
+     * Disable fpr the following post types
+     * @var array $post_types list of post types on which to disable gutenberg
+     */
+    $post_types = array(
+        'developments',
+    );
+
+    if ( in_array($post_type, $post_types) ) return false;
+    
+    /**
+     * Disable on certain page templates
+     * @var page_template_slug gets the current page template slug
+     * @var array
+     */
+    $page_template_slug = get_page_template_slug();
+    $page_templates = array(
+        //'template-coming-soon.php'
+    );
+
+    if ( in_array($page_template_slug, $page_templates) ) return false;
+
+    return $is_enabled;
+    
+}
+
+add_filter('use_block_editor_for_post_type', 'disable_gutenberg_on_posts', 10, 2);
+
+
+/**
+ * Create an ACF options page (Pro only)
+ */ 
+if(function_exists('acf_add_options_page')) {
+  acf_add_options_page('Site Options');
+}
+
+/**
+ * init_acf_googlemap
+ *
+ * Uses the salient google map field to update the ACF google map setting
+ */
+function init_acf_googlemap() {
+    $apiKey = get_field('google_maps_api_key', 'option');
+    if ($apiKey) {
+        acf_update_setting('google_api_key', $apiKey);
+    }
+}
+
+add_action('acf/init', 'init_acf_googlemap');
+
+
+/**
+ * Enqueue the assets for the developments single post type
+ */
+
+function rk_enqueue_custom_assets() {
+    /**
+     * Slick Slider
+     */
+    wp_enqueue_script( 'slick', get_stylesheet_directory_uri() . '/assets/slick/slick.min.js', array('jquery'), time(), false);
+    wp_enqueue_style( 'slick', get_stylesheet_directory_uri() . '/assets/slick/slick.css', array(), time(), 'all');
+    wp_enqueue_style( 'slick-theme', get_stylesheet_directory_uri() . '/assets/slick/slick-theme.css', array(), time(), 'all');
+
+    wp_enqueue_script( 'pacifico', get_stylesheet_directory_uri() . '/assets/pacifico.js', array('slick', 'jquery'), time(), false);
+
+    wp_localize_script( 'pacifico', 'pacificoVars', array( 
+            'ajaxurl'            => admin_url( 'admin-ajax.php' ),
+        )
+    );
+
+}
+
+add_action('wp', 'rk_enqueue_custom_assets');
+
+/**
+ * Render custom numeric pagination from wp_query
+ * @param  array $custom_query A wordpress wp_query result.
+ *
+ * @example echo numericPagination($wp_query);
+ */
+function numericPagination( $custom_query ) {
+
+    $total_pages = $custom_query->max_num_pages;
+    $big = 999999999; // need an unlikely integer
+
+    if ($total_pages > 1){
+
+        $current_page = max(1, get_query_var('paged'));
+        
+        $html = '<div class="numeric-pagination">';
+        $html .= paginate_links(array(
+            'base' => str_replace( $big, '%#%', esc_url( get_pagenum_link( $big ) ) ),
+            'format' => '?paged=%#%',
+            'current' => $current_page,
+            'total' => $total_pages,
+            'prev_text' => '<i class="rk-icon-left-chevron"></i><span class="text">Previous</span>',
+            'next_text' => '<span class="text">Next</span><i class="rk-icon-right-chevron"></i>'
+        ));
+        $html .= '</div>';
+    }
+
+    return $html;
+}
+
+
+/**
+ * Edit existing post types
+ */
+
+add_filter( 'register_post_type_args', 'rk_update_cpts_with_front', 10, 2 );
+function rk_update_cpts_with_front( $args, $post_type ) {
+
+    // Let's make sure that we're customizing the post type we really need
+    if ( $post_type !== 'houzez_agent' ) {
+        return $args;
+    }
+    
+    // Now, we have access to the $args variable
+    // If you want to modify just one label, you can do something like this
+    $args['rewrite']['with_front'] = false;
+    
+    
+    return $args;
+}
+
+/**
+ * Custom Yoast Variables
+ */
+
+function rk_get_first_term_in_taxonomy($post_id, $taxonomy) {
+    $terms = get_the_terms($post_id,  $taxonomy);
+    return $terms[0]->name;
+}
+
+function rk_build_property_meta() {
+
+    global $post;
+    $post_id = $post->ID;
+
+    $meta = array();
+
+    $additional_features = get_post_meta($post_id, 'additional_features', true);
+    $property_type       = rk_get_first_term_in_taxonomy($post_id, 'property_type');
+    $property_area       = rk_get_first_term_in_taxonomy($post_id, 'property_area');
+    $property_city       = rk_get_first_term_in_taxonomy($post_id, 'property_city');
+    $bedrooms            = get_post_meta($post_id, 'fave_property_bedrooms', true);
+    $bathrooms           = get_post_meta($post_id, 'fave_property_bathrooms', true);
+    $price               = get_post_meta($post_id, 'fave_property_price', true);
+    $has_furnished       = false;
+    $has_view            = false;
+
+    foreach ($additional_features as $feature) {
+        if ($feature['fave_additional_feature_title'] == 'Furnished') {
+            $has_furnished = $feature['fave_additional_feature_value'];
+        } else if ($feature['fave_additional_feature_title'] == 'View') {
+            $has_view = $feature['fave_additional_feature_value'];
+        }
+    }
+
+    $meta[] = $property_city;
+    $meta[] = $property_area;
+
+    if ($has_furnished) {
+        $meta[] = $has_furnished;
+    }
+
+    if ($property_type == 'Condos') {
+        $property_type = 'Condo';
+    } else if ($property_type == 'Houses') {
+        $property_type = 'House';
+    }
+
+    $meta[] = $property_type;
+    $meta[] = 'For Sale.';
+
+    if ($bedrooms) {
+        $bedrooms = $bedrooms . ' Bedrooms.';
+        $meta[]   = $bedrooms;
+    }
+
+    if ($bathrooms) {
+        $bathrooms = $bathrooms . ' Bathrooms.';
+        $meta[]    = $bathrooms;
+    }
+
+    if ($has_view) {
+        $meta[] = $has_view . ' View.';
+    }
+
+    $meta[] = 'USD$ ' . number_format($price) . '.';
+    $meta[] = 'Contact Pacifico Property For More Info.';
+
+    return implode(' ', $meta);
+
+}
+
+function rk_register_yoast_vars() {
+    wpseo_register_var_replacement('%%property_meta%%', 'rk_build_property_meta', 'advanced', 'The custom property meta.');
+}
+
+add_action('wpseo_register_extra_replacements', 'rk_register_yoast_vars');
